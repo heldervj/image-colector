@@ -1,0 +1,4 @@
+*.pyc
+.vscode
+_pycache_
+*.log
