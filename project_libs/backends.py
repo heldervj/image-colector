@@ -1,67 +1,83 @@
-import os
-import time
+import hashlib
 import io
+import logging as log
+import os
+import re
+import time
+import pickle
+
 import requests
 from PIL import Image
-import hashlib
+
+log.basicConfig(filename='coletor.log',level=log.DEBUG)
+
+# from project_libs.browsers import ChromeBrowser as webdriver
+from selenium import webdriver
+
+from multiprocessing import Pool
+
 
 def fetch_image_urls(query:str, max_links_to_fetch:int, wd, sleep_between_interactions:int=1):
     def scroll_to_end(wd):
-        wd.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(sleep_between_interactions)    
-    
+        wd.execute_script("window.scrollTo(0, 1000000000);")
+        time.sleep(sleep_between_interactions*1)
+        
+        load_more_button = wd.find_element_by_css_selector(".mye4qd")
+        if load_more_button:
+            wd.execute_script("document.querySelector('.mye4qd').click();")
+            time.sleep(sleep_between_interactions)
+            log.info("Buscando novas imagens")
+
+
     # build the google query
     search_url = "https://www.google.com/search?safe=off&site=&tbm=isch&source=hp&q={q}&oq={q}&gs_l=img"
 
     # load the page
     wd.get(search_url.format(q=query))
 
-    image_urls = set()
     image_count = 0
-    results_start = 0
     while image_count < max_links_to_fetch:
         scroll_to_end(wd)
 
         # get all image thumbnail results
         thumbnail_results = wd.find_elements_by_css_selector("img.Q4LuWd")
         number_results = len(thumbnail_results)
-        
-        print(f"Found: {number_results} search results. Extracting links from {results_start}:{number_results}")
-        
-        for img in thumbnail_results[results_start:number_results]:
-            # try to click every thumbnail such that we can get the real image behind it
-            try:
-                img.click()
-                time.sleep(sleep_between_interactions)
-            except Exception:
-                continue
 
-            # extract image urls    
-            actual_images = wd.find_elements_by_css_selector('img.n3VNCb')
-            for actual_image in actual_images:
-                if actual_image.get_attribute('src') and 'http' in actual_image.get_attribute('src'):
-                    image_urls.add(actual_image.get_attribute('src'))
+        # Caso nao tenha novos resultados na pagina e nao atingimos o limite 
+        # De imagens
+        if image_count==number_results:
+            break
+        image_count = number_results
 
-            image_count = len(image_urls)
+    # Obtemos lista de links com imagens
+    list_links = wd.execute_script("""
+        function img_find() {
+        var imgs = document.querySelectorAll(".wXeWr"), imgSrcs = []; 
+        for (var i = 0; i < imgs.length; i++) {
+            imgs[i].click()
+            imgSrcs.push(imgs[i].href);
+        };
+        return imgSrcs;
+        };
+        return img_find();
+        """)
 
-            if len(image_urls) >= max_links_to_fetch:
-                print(f"Found: {len(image_urls)} image links, done!")
-                break
-        else:
-            print("Found:", len(image_urls), "image links, looking for more ...")
-            time.sleep(30)
-            return
-            load_more_button = wd.find_element_by_css_selector(".mye4qd")
-            if load_more_button:
-                wd.execute_script("document.querySelector('.mye4qd').click();")
-
-        # move the result startpoint further down
-        results_start = len(thumbnail_results)
-
-    return image_urls
+    return list_links
 
 
-def persist_image(folder_path:str,url:str):
+def parse_source_img(url_to_parse: str):
+    res = requests.request("GET", url_to_parse)
+    srcs = [m.start() + 5 for m in re.finditer('src="http', str(res.content))]
+    return str(res.content)[srcs[0]:srcs[0] + str(res.content)[srcs[0]:].find('"')]
+
+def persist_image(folder_path:str, url_to_parse:str):
+    
+    try:
+        url = parse_source_img(url_to_parse)
+    except:
+        log.error(url_to_parse)
+        return None
+
     try:
         image_content = requests.get(url).content
 
@@ -79,17 +95,23 @@ def persist_image(folder_path:str,url:str):
         print(f"ERROR - Could not save {url} - {e}")
 
 
-def search_and_download(search_term:str,target_path='./images',number_images=5):
-    from selenium import webdriver
+def search_and_download(search_term:str, target_path='./images', number_images=5):
     target_folder = os.path.join(target_path,'_'.join(search_term.lower().split(' ')))
 
     if not os.path.exists(target_folder):
         os.makedirs(target_folder)
 
-    with webdriver.Chrome() as wd:
-        res = fetch_image_urls(search_term, number_images, wd=wd, sleep_between_interactions=0.5)
-        
-    if res:
-        for elem in res:
-            if elem:
-                persist_image(target_folder, elem)
+    try:
+        list_links = pickle.load(open(target_folder + '.pkl', 'rb'))
+    except:
+        with webdriver.Chrome() as wd:
+            list_links = fetch_image_urls(search_term, number_images, wd=wd, sleep_between_interactions=1)
+    
+    with open(target_folder + '.pkl', 'wb') as file:
+        pickle.dump(list_links, file)
+
+    with Pool(20) as p:
+       p.starmap(persist_image, zip([target_folder for _ in list_links], list_links))
+    # for link in list_links:
+    #     persist_image(target_folder, link)
+
