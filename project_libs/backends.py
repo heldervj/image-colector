@@ -1,20 +1,18 @@
 import hashlib
 import io
-import logging as log
 import os
+import pickle
 import re
 import time
-import pickle
+from datetime import datetime, timedelta
+from concurrent.futures import TimeoutError
+
 
 import requests
+from configuracoes.settings_log import logger
 from PIL import Image
-
-log.basicConfig(filename='coletor.log',level=log.DEBUG)
-
 # from project_libs.browsers import ChromeBrowser as webdriver
 from selenium import webdriver
-
-from multiprocessing import Pool
 
 
 def fetch_image_urls(query:str, max_links_to_fetch:int, wd, sleep_between_interactions:int=1):
@@ -26,8 +24,7 @@ def fetch_image_urls(query:str, max_links_to_fetch:int, wd, sleep_between_intera
         if load_more_button:
             wd.execute_script("document.querySelector('.mye4qd').click();")
             time.sleep(sleep_between_interactions)
-            log.info("Buscando novas imagens")
-
+            logger.info(f"{query}: Buscando novas imagens")
 
     # build the google query
     search_url = "https://www.google.com/search?safe=off&site=&tbm=isch&source=hp&q={q}&oq={q}&gs_l=img"
@@ -46,9 +43,14 @@ def fetch_image_urls(query:str, max_links_to_fetch:int, wd, sleep_between_intera
         # Caso nao tenha novos resultados na pagina e nao atingimos o limite 
         # De imagens
         if image_count==number_results:
+            logger.info(f"{query}: Nao ha mais imagens")
             break
         image_count = number_results
-
+    
+    else:
+        logger.info(f"{query}: Encontrado {max_links_to_fetch} imagens.")
+    
+    inicio = datetime.now()
     # Obtemos lista de links com imagens
     list_links = wd.execute_script("""
         function img_find() {
@@ -61,7 +63,9 @@ def fetch_image_urls(query:str, max_links_to_fetch:int, wd, sleep_between_intera
         };
         return img_find();
         """)
+    final = datetime.now()
 
+    logger.info(f"{query}: Tempo para selecionar todas as imagens: {(final - inicio).seconds}")
     return list_links
 
 
@@ -71,31 +75,30 @@ def parse_source_img(url_to_parse: str):
     return str(res.content)[srcs[0]:srcs[0] + str(res.content)[srcs[0]:].find('"')]
 
 def persist_image(folder_path:str, url_to_parse:str):
-    
     try:
         url = parse_source_img(url_to_parse)
-    except:
-        log.error(url_to_parse)
-        return None
 
-    try:
-        image_content = requests.get(url).content
+        try:
+            image_content = requests.get(url).content
+        except Exception as error:
+            logger.error(f'GET IMG: {url} - erro: {error.__str__()}')
 
-    except Exception as e:
-        print(f"ERROR - Could not download {url} - {e}")
+        try:
+            image_file = io.BytesIO(image_content)
+            image = Image.open(image_file).convert('RGB')
+            file_path = os.path.join(folder_path,hashlib.sha1(image_content).hexdigest()[:10] + '.jpg')
+            with open(file_path, 'wb') as f:
+                image.save(f, "JPEG", quality=85)
+            logger.info(f"SUCCESS - saved {url} - as {file_path}")
+        except Exception as error:
+            logger.error(f'SAVE: {url} - erro: {error.__str__()}')
 
-    try:
-        image_file = io.BytesIO(image_content)
-        image = Image.open(image_file).convert('RGB')
-        file_path = os.path.join(folder_path,hashlib.sha1(image_content).hexdigest()[:10] + '.jpg')
-        with open(file_path, 'wb') as f:
-            image.save(f, "JPEG", quality=85)
-        print(f"SUCCESS - saved {url} - as {file_path}")
-    except Exception as e:
-        print(f"ERROR - Could not save {url} - {e}")
+    except Exception as error:
+        logger.error(f'DIR: {folder_path}: {url_to_parse} - erro: {error.__str__()}')
+    
 
 
-def search_and_download(search_term:str, target_path='./images', number_images=5):
+def search_and_download(search_term:str, target_path='./images', number_images=5, pool = None):
     target_folder = os.path.join(target_path,'_'.join(search_term.lower().split(' ')))
 
     if not os.path.exists(target_folder):
@@ -103,15 +106,37 @@ def search_and_download(search_term:str, target_path='./images', number_images=5
 
     try:
         list_links = pickle.load(open(target_folder + '.pkl', 'rb'))
+        logger.info(f"{search_term}: Encontrado em .pkl")
     except:
+        logger.info(f"{search_term}: Iniciando Busca no google")
         with webdriver.Chrome() as wd:
             list_links = fetch_image_urls(search_term, number_images, wd=wd, sleep_between_interactions=1)
-    
+
+        logger.info(f"{search_term}: Busca no google finalizada com sucesso")
+
     with open(target_folder + '.pkl', 'wb') as file:
         pickle.dump(list_links, file)
 
-    with Pool(20) as p:
-       p.starmap(persist_image, zip([target_folder for _ in list_links], list_links))
+    logger.info(f"{search_term}: Iniciando armazenamento em HD")
+    with pool(40) as p:
+        future = p.map(persist_image, args=tuple(zip([target_folder for _ in list_links], list_links)), timeout=5)
+
+        iterator = future.result()
+
+        while True:
+            try:
+                result = next(iterator)
+            except StopIteration:
+                break
+            except TimeoutError as error:
+                print("function took longer than %d seconds" % error.args[1])
+            except ProcessExpired as error:
+                print("%s. Exit code: %d" % (error, error.exitcode))
+            except Exception as error:
+                print("function raised %s" % error)
+                print(error.traceback)  # Python's traceback of remote process
+        # p.starmap(persist_image, zip([target_folder for _ in list_links], list_links))
+    
+    logger.info(f"{search_term}: Armazenamento em HD finalizado com sucesso")
     # for link in list_links:
     #     persist_image(target_folder, link)
-
