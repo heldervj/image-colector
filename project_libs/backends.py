@@ -7,6 +7,7 @@ import time
 from datetime import datetime, timedelta
 from concurrent.futures import TimeoutError
 
+from configuracoes.settings_request import TIMEOUT
 
 import requests
 from configuracoes.settings_log import logger
@@ -70,7 +71,7 @@ def fetch_image_urls(query:str, max_links_to_fetch:int, wd, sleep_between_intera
 
 
 def parse_source_img(url_to_parse: str):
-    res = requests.request("GET", url_to_parse)
+    res = requests.request("GET", url_to_parse, timeout=TIMEOUT)
     srcs = [m.start() + 5 for m in re.finditer('src="http', str(res.content))]
     return str(res.content)[srcs[0]:srcs[0] + str(res.content)[srcs[0]:].find('"')]
 
@@ -79,7 +80,7 @@ def persist_image(folder_path:str, url_to_parse:str):
         url = parse_source_img(url_to_parse)
 
         try:
-            image_content = requests.get(url).content
+            image_content = requests.get(url, timeout=TIMEOUT).content
         except Exception as error:
             logger.error(f'GET IMG: {url} - erro: {error.__str__()}')
 
@@ -119,23 +120,23 @@ def search_and_download(search_term:str, target_path='./images', number_images=5
 
     logger.info(f"{search_term}: Iniciando armazenamento em HD")
     with pool(40) as p:
-        future = p.map(persist_image, args=tuple(zip([target_folder for _ in list_links], list_links)), timeout=5)
+        # future = p.map(persist_image, args=tuple(zip([target_folder for _ in list_links], list_links)))
 
-        iterator = future.result()
+        # iterator = future.result()
 
-        while True:
-            try:
-                result = next(iterator)
-            except StopIteration:
-                break
-            except TimeoutError as error:
-                print("function took longer than %d seconds" % error.args[1])
-            except ProcessExpired as error:
-                print("%s. Exit code: %d" % (error, error.exitcode))
-            except Exception as error:
-                print("function raised %s" % error)
-                print(error.traceback)  # Python's traceback of remote process
-        # p.starmap(persist_image, zip([target_folder for _ in list_links], list_links))
+        # while True:
+        #     try:
+        #         result = next(iterator)
+        #     except StopIteration:
+        #         break
+        #     except TimeoutError as error:
+        #         print("function took longer than %d seconds" % error.args[1])
+        #     except ProcessExpired as error:
+        #         print("%s. Exit code: %d" % (error, error.exitcode))
+        #     except Exception as error:
+        #         print("function raised %s" % error)
+        #         print(error.traceback)  # Python's traceback of remote process
+        p.starmap(persist_image, zip([target_folder for _ in list_links], list_links))
     
     logger.info(f"{search_term}: Armazenamento em HD finalizado com sucesso")
     # for link in list_links:
